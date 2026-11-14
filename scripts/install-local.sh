@@ -33,13 +33,16 @@ else
     ditto "$TICKFIN_APP_PATH" "$stage/payload/Tickfin.app"
     cp "$TICKFIN_APP_PATH/Contents/MacOS/StockBar" "$stage/update-helper"
     plan="$stage/plan.json"
-    plutil -create json "$plan"
+    # Some plutil versions cannot preserve JSON during -insert. Edit an XML
+    # plist first, then convert once to the JSON consumed by UpdateTransaction.
+    plutil -create xml1 "$plan"
     plutil -insert root -string "file://$stage/" "$plan"
     plutil -insert target -string "file://$target/" "$plan"
     version="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$TICKFIN_APP_PATH/Contents/Info.plist")"
     plutil -insert version -string "$version" "$plan"
     plutil -insert parentPID -integer "$$" "$plan"
     plutil -insert token -string "$token" "$plan"
+    plutil -convert json "$plan"
     "$stage/update-helper" --apply-update "$plan" </dev/null >/dev/null 2>&1 &
     helper_pid=$!
     for ((i=0; i<50; i++)); do

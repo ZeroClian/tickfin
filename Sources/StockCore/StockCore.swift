@@ -289,23 +289,27 @@ public enum QuoteParser {
         for match in regex.matches(in: text, range: NSRange(location: 0, length: string.length)) {
             let raw = string.substring(with: match.range(at: 1))
             let fields = string.substring(with: match.range(at: 2)).components(separatedBy: "~")
-            guard let symbol = try? StockSymbol(raw), fields.count > 61,
-                  fields[2] == symbol.code,
-                  fields[0] == ["sh":"1", "sz":"51", "bj":"62"][String(raw.prefix(2))],
-                  fields[61] == securityCategory(for: symbol),
-                  let last = strictDecimal(fields[3]), let previous = strictDecimal(fields[4]),
-                  let change = strictDecimal(fields[31]), let percent = strictDecimal(fields[32]),
-                  let timestamp = parseTimestamp(fields[30]) else { continue }
-            // Optional range fields must not discard an otherwise valid current price.
-            let high = strictDecimal(fields[33]).flatMap { $0 > 0 && $0 >= last ? $0 : nil }
-            let low = strictDecimal(fields[34]).flatMap { $0 > 0 && $0 <= last ? $0 : nil }
-            let quote = Quote(symbol: symbol, name: fields[1].trimmingCharacters(in: .whitespacesAndNewlines), last: last, previousClose: previous, percent: percent, timestamp: timestamp, dayHigh: high, dayLow: low)
-            guard quote.isValid, quote.change == change else { continue }
+            guard let symbol = try? StockSymbol(raw), let quote = parse(fields: fields, symbol: symbol) else { continue }
             // If a provider repeats a symbol, retain its most recent valid row.
-            if let old = quotes[raw], old.timestamp > timestamp { continue }
+            if let old = quotes[raw], old.timestamp > quote.timestamp { continue }
             quotes[raw] = quote
         }
         return quotes
+    }
+
+    // History endpoints embed the same quote fields in JSON. Share identity, board,
+    // precision and consistency checks rather than trusting a response dictionary key.
+    static func parse(fields: [String], symbol: StockSymbol) -> Quote? {
+        guard fields.count > 61, fields[2] == symbol.code,
+              fields[0] == ["sh":"1", "sz":"51", "bj":"62"][String(symbol.rawValue.prefix(2))],
+              fields[61] == securityCategory(for: symbol),
+              let last = strictDecimal(fields[3]), let previous = strictDecimal(fields[4]),
+              let change = strictDecimal(fields[31]), let percent = strictDecimal(fields[32]),
+              let timestamp = parseTimestamp(fields[30]) else { return nil }
+        let high = strictDecimal(fields[33]).flatMap { $0 > 0 && $0 >= last ? $0 : nil }
+        let low = strictDecimal(fields[34]).flatMap { $0 > 0 && $0 <= last ? $0 : nil }
+        let quote = Quote(symbol: symbol, name: fields[1].trimmingCharacters(in: .whitespacesAndNewlines), last: last, previousClose: previous, percent: percent, timestamp: timestamp, dayHigh: high, dayLow: low)
+        return quote.isValid && quote.change == change ? quote : nil
     }
 
     private static func securityCategory(for symbol: StockSymbol) -> String {

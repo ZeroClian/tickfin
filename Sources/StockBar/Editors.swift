@@ -50,8 +50,6 @@ struct AddStockView: View {
                     .accessibilityLabel("股票或 ETF 代码、拼音首字母")
                     .onChange(of: code) { search.updateQuery($0) }
                     .onSubmit { search.updateQuery(code, immediately: true) }
-                Text("沪深北 A 股 · 沪深场内 ETF")
-                    .font(.system(size: 10)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
                 if search.isSearching {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.mini)
@@ -114,10 +112,23 @@ struct AddStockView: View {
     }
 }
 
+enum StockDetailTab: Hashable {
+    case line, fiveMinute, holding, alerts
+    var chartMode: IntradayMode? {
+        switch self {
+        case .line: return .line
+        case .fiveMinute: return .fiveMinute
+        case .holding, .alerts: return nil
+        }
+    }
+}
+
 struct StockEditor: View {
     @ObservedObject var store: AppStore
     let item: WatchItem
-    @ViewState private var alerts: Bool
+    @ViewState private var detailTab: StockDetailTab
+    @StateObject private var chart: IntradayChartModel
+    private var alerts: Bool { detailTab == .alerts }
     @ViewState private var alias: String
     @ViewState private var shares: String
     @ViewState private var cost: String
@@ -139,9 +150,10 @@ struct StockEditor: View {
     @ViewState private var confirmRemoval = false
     @ViewState private var confirmClearHolding = false
 
-    init(store: AppStore, item: WatchItem, initialAlerts: Bool) {
+    init(store: AppStore, item: WatchItem, initialAlerts: Bool, initialTab: StockDetailTab? = nil, chartModel: IntradayChartModel? = nil) {
         self.store = store; self.item = item
-        _alerts = ViewState(initialValue: initialAlerts)
+        _detailTab = ViewState(initialValue: initialTab ?? (initialAlerts ? .alerts : .line))
+        _chart = StateObject(wrappedValue: chartModel ?? IntradayChartModel(service: store.intradayService, clock: { store.currentDate }))
         _alias = ViewState(initialValue: store.state.aliases[item.id] ?? "")
         _shares = ViewState(initialValue: String(item.holding.quantity))
         _cost = ViewState(initialValue: UI.input(item.holding.averageCost))
@@ -166,9 +178,29 @@ struct StockEditor: View {
             PanelHeader(store: store, title: store.displayName(item),
                         subtitle: store.revealed ? item.symbol.marketName + " " + item.symbol.code : "", showPrivacy: true)
             priceSummary
-            Picker("自选项设置", selection: $alerts) {
-                Text("持仓").tag(false); Text("提醒").tag(true)
-            }.pickerStyle(.segmented).labelsHidden().padding(.horizontal, 12).padding(.top, 10).disabled(saving)
+            // The regular native control has a 296pt minimum width. Small keeps
+            // all four segments inside the 256pt content area on every update.
+            Picker("个股详情", selection: $detailTab) {
+                Text("分时").tag(StockDetailTab.line)
+                Text("5 分钟 K").tag(StockDetailTab.fiveMinute)
+                Text("持仓").tag(StockDetailTab.holding)
+                Text("提醒").tag(StockDetailTab.alerts)
+            }.pickerStyle(.segmented).labelsHidden().controlSize(.small).frame(width: 256)
+                .padding(.horizontal, 12).padding(.top, 10).disabled(saving)
+            if let mode = detailTab.chartMode {
+                IntradayChartSection(model: chart, mode: mode, item: item, revealed: store.revealed,
+                                     interval: store.state.refreshIntervalSeconds, now: store.currentDate) { detailTab = .alerts }
+            } else {
+                editorForm
+            }
+        }
+        .confirmationDialog("移出 \(store.displayName(item))？", isPresented: $confirmRemoval, titleVisibility: .visible) {
+            Button("移出并删除本地持仓", role: .destructive) { store.remove(item.id) }
+            Button("取消", role: .cancel) {}
+        } message: { Text("本地持仓与提醒设置将一并删除，不影响券商账户。") }
+        .onDisappear { saveTask?.cancel() }
+    }
+    private var editorForm: some View {
             VStack(alignment: .leading, spacing: alerts ? 8 : 10) {
                 if alerts { alertForm } else { holdingForm }
                 HStack(spacing: 7) {
@@ -192,37 +224,17 @@ struct StockEditor: View {
                     Button("保存") { save() }.keyboardShortcut("s", modifiers: .command).disabled(saving || !store.storageHealthy)
                 }.padding(.top, 2)
             }.font(.system(size: 11)).controlSize(.small).padding(12)
+    }
+    @ViewBuilder private var priceSummary: some View {
+        if let mode = detailTab.chartMode {
+            IntradayPriceSummary(model: chart, symbol: item.symbol, mode: mode, now: store.currentDate)
+        } else {
+            let quote = [store.quotes[item.id], chart.latestQuote(for: item.symbol)].compactMap { $0 }.max { $0.timestamp < $1.timestamp }
+            StockPriceSummary(symbol: item.symbol, mode: .line, readout: quote.map(IntradayReadout.init(quote:)),
+                dateLabel: quote == store.quotes[item.id] ? store.quoteLabel(item.id) :
+                    quote.map { (MarketClock.day($0.timestamp) == MarketClock.day(store.currentDate) ? "行情 · " : "历史行情 · ") + UI.time($0.timestamp, full: true) } ?? "等待行情",
+                isLoading: store.isRefreshing)
         }
-        .confirmationDialog("移出 \(store.displayName(item))？", isPresented: $confirmRemoval, titleVisibility: .visible) {
-            Button("移出并删除本地持仓", role: .destructive) { store.remove(item.id) }
-            Button("取消", role: .cancel) {}
-        } message: { Text("本地持仓与提醒设置将一并删除，不影响券商账户。") }
-        .onDisappear { saveTask?.cancel() }
-    }
-    private var priceSummary: some View {
-        let quote = store.quotes[item.id]
-        return VStack(spacing: 5) {
-            HStack(alignment: .bottom, spacing: 4) {
-                priceColumn("当日最高价", value: quote?.dayHigh)
-                priceColumn("当前价格", value: quote?.last, prominent: true)
-                priceColumn("当日最低价", value: quote?.dayLow)
-            }
-            Text(store.quoteLabel(item.id))
-                .font(.system(size: 9)).foregroundColor(.secondary)
-                .lineLimit(1).minimumScaleFactor(0.8)
-        }.padding(.horizontal, 12).padding(.top, 12)
-    }
-    private func priceColumn(_ title: String, value: Decimal?, prominent: Bool = false) -> some View {
-        VStack(spacing: 5) {
-            Text(title).font(.system(size: 9)).foregroundColor(.secondary)
-            Text(value.map { UI.number($0, digits: item.symbol.priceFractionDigits) } ?? "—")
-                .font(.system(size: prominent ? 18 : 14, weight: prominent ? .medium : .regular))
-                .monospacedDigit().lineLimit(1).minimumScaleFactor(0.65)
-                .frame(height: 22, alignment: .bottom)
-        }.frame(maxWidth: .infinity)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(title)
-            .accessibilityValue(value.map { UI.number($0, digits: item.symbol.priceFractionDigits) + " 元" } ?? "暂无行情")
     }
     private var holdingForm: some View {
         Group {
@@ -239,13 +251,6 @@ struct StockEditor: View {
                 Button("显示持仓以编辑") { store.revealed = true }
             }
             Toggle("设为状态栏选中项", isOn: $pin).toggleStyle(.checkbox)
-            DisclosureGroup("计算说明") {
-                Text(item.symbol.isETF
-                     ? "当日估算＝每份涨跌 × 当前份数。\n浮动盈亏＝（现价 − 每份平均成本）× 当前份数。\n份数填 0 清空持仓；不计日内交易、卖出收益或分红。"
-                     : "当日估算＝每股涨跌 × 当前股数。\n浮动盈亏＝（现价 − 平均成本）× 当前股数。\n股数填 0 清空持仓；不计日内交易、卖出收益或分红。")
-                    .font(.system(size: 10)).foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true).padding(.top, 3)
-            }
         }
     }
     private var alertForm: some View {
@@ -264,7 +269,7 @@ struct StockEditor: View {
                     Picker("浮动盈亏", selection: $holdingRule.unit) {
                         Text("金额（元）").tag(HoldingAlertUnit.amount)
                         Text("比例（%）").tag(HoldingAlertUnit.percent)
-                    }.help("按单项持仓浮动盈亏判断，亏损阈值填正数；数量或成本为零时暂停。")
+                    }
                     threshold("盈利达到", enabled: $holdingRule.profitEnabled, value: $profitTarget, unit: holdingRule.unit == .amount ? "元" : "%")
                     threshold("亏损达到", enabled: $holdingRule.lossEnabled, value: $lossTarget, unit: holdingRule.unit == .amount ? "元" : "%")
                 } else {
@@ -274,18 +279,10 @@ struct StockEditor: View {
             Text(enabledAlertSummary).font(.system(size: 9)).foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if alertSection == 3 {
-                Text("适用于本自选项的三类提醒").font(.system(size: 10)).foregroundColor(.secondary)
                 Picker("提醒方式", selection: $delivery) {
                     Text("静默小点").tag(AlertDelivery.silent)
                     Text("系统通知").tag(AlertDelivery.system)
                     Text("Bark 推送").tag(AlertDelivery.bark)
-                }
-                Text(delivery == .silent ? "只亮小点，无横幅、无声音。" : delivery == .bark ? "需在偏好中启用 Bark；发送已配置模板，并保留本机未读提醒。" : "需系统通知权限；通知使用代号，不含金额。")
-                    .font(.system(size: 10)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
-                DisclosureGroup("触发规则") {
-                    Text("每条规则每天一次。达到或越过阈值即满足；保存后已达标会在下一次有效行情提醒。三类条件可同时启用。盈亏按此项持仓的浮动盈亏判断，亏损阈值填正数；数量或成本为零时暂停。收起面板继续监测；休眠、休市、旧行情不提醒。")
-                        .font(.system(size: 10)).foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true).padding(.top, 3)
                 }
             }
         }
@@ -346,7 +343,7 @@ extension SettingsSection {
         case .notifications: return "提醒通知"
         case .bark: return "Bark 推送"
         case .updates: return "版本更新"
-        case .data: return "数据与说明"
+        case .data: return "使用说明与数据"
         }
     }
 }
@@ -366,10 +363,10 @@ struct SettingsView: View {
                 } else {
                     entry(.appearance, icon: "keyboard", detail: "状态栏模式 · 完整快捷键清单")
                     entry(.refresh, icon: "arrow.clockwise", detail: "\(store.state.refreshIntervalSeconds) 秒 · 休市暂停")
-                    entry(.notifications, icon: "bell", detail: "静默小点 · 系统通知")
+                    entry(.notifications, icon: "bell", detail: "触发规则 · 通知方式")
                     entry(.bark, icon: "iphone", detail: store.state.bark.enabled ? "已启用 · 连接与模板" : "手机与手表 · 未启用")
                     entry(.updates, icon: "arrow.down.circle", detail: "当前版本 " + store.updateChecker.currentVersion)
-                    entry(.data, icon: "internaldrive", detail: "本地数据 · 使用说明")
+                    entry(.data, icon: "book.closed", detail: "操作 · 图表 · 持仓计算")
                     Divider()
                     HStack {
                         Text("Tickfin").foregroundColor(.secondary)
@@ -413,25 +410,39 @@ struct SettingsView: View {
             Button(store.isRefreshing ? "刷新中…" : "立即刷新") { Task { await store.refresh(manually: true) } }
                 .disabled(store.isRefreshing || store.state.items.isEmpty)
         case .notifications:
+            DisclosureGroup("触发规则") {
+                Text("涨跌幅、价格和盈亏条件可同时启用。达到或越过阈值即满足，每条规则每天一次；修改阈值视为新规则。保存时已达标的条件，在下一次有效行情刷新时判断。\n\n盈亏按单项持仓的浮动盈亏计算，亏损阈值填正数；数量或成本为零时暂停盈亏提醒。提醒按刷新间隔采样，两次刷新之间短暂触及阈值可能不会触发。\n\n收起面板后继续监测，电脑休眠、应用退出、休市或行情过旧时不提醒。")
+                    .font(.system(size: 10)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            Divider()
             Text("静默提醒").fontWeight(.medium)
+            Text("只亮状态栏小点，无横幅和声音。").font(.system(size: 10)).foregroundColor(.secondary)
             HStack {
                 Button("测试小点") { store.previewDot = true; store.message = "静默测试：状态栏已亮小点，没有发送系统通知。" }
                 Button("查看提醒") { store.route = .inbox }
             }
             Divider()
             Text("系统通知 · " + permissionText).fontWeight(.medium)
-            Text("仅对主动选择系统通知的自选项发送。专注模式可能影响横幅。")
+            Text("仅对选择此方式的自选项发送，使用代号、不含金额。需要通知权限，专注模式可能影响横幅。")
                 .font(.system(size: 10)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
             HStack {
                 Button("测试通知") { testing = true; testTask = Task { await store.testNotification(); testing = false } }.disabled(testing)
                 Button("通知设置") { store.openNotificationSettings() }
             }
+            Divider()
+            Text("Bark 推送").fontWeight(.medium)
+            Text("先在 Bark 推送中配置连接，再为自选项选择此方式；通知内容使用该页的模板，并保留本机未读提醒。")
+                .font(.system(size: 10)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+            Button("Bark 设置") { store.route = .settingsPage(.bark) }
         case .bark:
             BarkSettingsView(store: store)
         case .updates:
             UpdateSettingsView(checker: store.updateChecker)
         case .data:
-            Text("收起面板不影响交易时段内的提醒监测；休眠或退出后停止监测。持仓与行情缓存仅保存在本机，行情可能延迟，以券商数据为准。")
+            UsageGuideView()
+            Divider()
+            Text("本机数据").fontWeight(.medium)
+            Text("持仓、设置与行情缓存仅保存在本机。行情可能延迟，以券商数据为准。")
                 .font(.system(size: 10)).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
             Button("查看数据文件") { store.revealData() }
         }

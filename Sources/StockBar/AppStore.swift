@@ -63,7 +63,18 @@ final class AppStore: ObservableObject {
     @Published var previewDot = false
     @Published var message: String?
     @Published var error: String?
+    var panelStatusHeight: CGFloat { error != nil || message != nil ? 25 : 0 }
+    var panelViewportHeight: CGFloat {
+        let available = max(80, panelHeightLimit - panelStatusHeight)
+        // Keep detail tabs stable without reserving the whole 420pt panel.
+        // Revealed holdings and cost legends need a little more room.
+        if case .edit = route { return min(available, max(80, (revealed ? 370 : 350) - panelStatusHeight)) }
+        return min(panelContentHeight, available)
+    }
+    var panelDisplayHeight: CGFloat { min(panelHeightLimit, panelViewportHeight + panelStatusHeight) }
     let dataURL: URL
+    let intradayService: any IntradayProviding
+    var currentDate: Date { clock() }
     private let file: StateFile
     private let service: any QuoteProviding
     private let notifications: any NotificationSending
@@ -80,7 +91,7 @@ final class AppStore: ObservableObject {
     private var navigationRevision = 0
 
     init(dataDirectory: URL? = nil, service: any QuoteProviding = QuoteService(),
-         notifications: (any NotificationSending)? = nil, shortcutBackend: (any ShortcutRegistering)? = nil, scheduler: (any RefreshScheduling)? = nil, updateChecker: UpdateChecker? = nil, barkSender: (any BarkSending)? = nil, barkKeys: (any BarkKeyStoring)? = nil, clock: @escaping () -> Date = Date.init) {
+         notifications: (any NotificationSending)? = nil, shortcutBackend: (any ShortcutRegistering)? = nil, scheduler: (any RefreshScheduling)? = nil, updateChecker: UpdateChecker? = nil, barkSender: (any BarkSending)? = nil, barkKeys: (any BarkKeyStoring)? = nil, intradayService: any IntradayProviding = IntradayService(), clock: @escaping () -> Date = Date.init) {
         self.updateChecker = updateChecker ?? UpdateChecker()
         // One backend allocates unique Carbon IDs across all three actions.
         let backend = shortcutBackend ?? CarbonShortcutBackend()
@@ -89,6 +100,7 @@ final class AppStore: ObservableObject {
         self.nextShortcutManager = GlobalShortcutManager(backend: backend)
         self.scheduler = scheduler ?? RefreshScheduler()
         self.service = service
+        self.intradayService = intradayService
         self.notifications = notifications ?? NotificationService()
         self.barkSender = barkSender ?? BarkService()
         self.barkKeys = barkKeys ?? BarkKeychain()

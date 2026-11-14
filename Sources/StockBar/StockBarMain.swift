@@ -108,8 +108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
     private func resizePanel() {
         guard popover != nil else { return }
-        let statusHeight: CGFloat = store.error != nil || store.message != nil ? 25 : 0
-        let target = NSSize(width: 280, height: min(store.panelHeightLimit, store.panelContentHeight + statusHeight))
+        let target = NSSize(width: 280, height: store.panelDisplayHeight)
         if popover.contentSize != target { popover.contentSize = target }
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -149,6 +148,25 @@ struct StockBarEntry {
         if let index = CommandLine.arguments.firstIndex(of: "--apply-update"), index + 1 < CommandLine.arguments.count {
             do { try UpdateTransaction.apply(planURL: URL(fileURLWithPath: CommandLine.arguments[index + 1])); exit(0) }
             catch { exit(1) }
+        }
+        // Read-only history check: does not start the app, load holdings or notify.
+        if CommandLine.arguments.contains("--check-history") {
+            Task {
+                do {
+                    for code in ["600519", "510300", "159915"] {
+                        let symbol = try StockSymbol(code)
+                        for mode in IntradayMode.allCases {
+                            let series = try await IntradayService().fetch(symbol, mode: mode)
+                            guard !series.isEmpty else { throw IntradayHistoryError.unavailable }
+                            let count = mode == .line ? series.points.count : series.candles.count
+                            print("\(symbol.rawValue) \(mode.title) \(MarketClock.day(series.day)) \(count) 条 截至 \(UI.time(series.lastTimestamp!))")
+                        }
+                    }
+                    exit(0)
+                } catch { fputs("走势检查失败：\(error.localizedDescription)\n", stderr); exit(1) }
+            }
+            RunLoop.main.run()
+            return
         }
 // Read-only diagnostic entry point: no notifications, settings, or holdings are created.
 if CommandLine.arguments.contains("--check-market") {

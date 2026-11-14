@@ -21,7 +21,7 @@ struct PanelView: View {
                     })
             }
             .id(store.route)
-            .frame(height: min(store.panelContentHeight, max(80, store.panelHeightLimit - (hasStatus ? 25 : 0))))
+            .frame(height: store.panelViewportHeight)
             .onPreferenceChange(ContentHeightKey.self) { height in
                 if height > 0 && abs(store.panelContentHeight - height) > 0.5 { store.panelContentHeight = height }
             }
@@ -118,7 +118,6 @@ struct HomeView: View {
                     Text(store.revealed ? "名称" : "代号").frame(maxWidth: .infinity, alignment: .leading)
                     Text(store.showHoldings ? "当日 · 元" : "涨跌幅").frame(width: 72, alignment: .trailing)
                     Text(store.showHoldings ? "浮动 · 元" : "涨跌 · 元").frame(width: 76, alignment: .trailing)
-                        .help(store.showHoldings ? "持仓浮动盈亏" : "股票为每股涨跌额，ETF 为每份涨跌额")
                 }.font(.system(size: 10)).foregroundColor(.secondary).padding(.horizontal, 12).frame(height: 22)
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -135,7 +134,7 @@ struct HomeView: View {
             Divider()
             HStack(spacing: 0) {
                 Text(TradingSchedule.isOpen(store.now) ? (store.latestTime.map { UI.time($0) } ?? "等待行情") : store.marketLabel)
-                    .font(.system(size: 10)).foregroundColor(.secondary).lineLimit(1).help(store.refreshDescription)
+                    .font(.system(size: 10)).foregroundColor(.secondary).lineLimit(1)
                 Spacer(minLength: 0)
                 IconButton(symbol: "arrow.clockwise", label: store.isRefreshing ? "正在刷新行情" : "手动刷新行情") { Task { await store.refresh(manually: true) } }
                     .disabled(store.isRefreshing || store.state.items.isEmpty)
@@ -201,7 +200,7 @@ struct AlertInbox: View {
         VStack(spacing: 0) {
             PanelHeader(store: store, title: "提醒", subtitle: "", showPrivacy: true)
             VStack(alignment: .leading, spacing: 10) {
-                if store.previewDot { Text("静默提醒测试：只亮小点，无横幅和声音。") }
+                if store.previewDot { Text("静默提醒测试") }
                 ForEach(store.state.unreadAlerts) { alert in
                     if let item = store.state.items.first(where: { $0.id == alert.symbol.rawValue }) {
                         Button { store.route = .edit(item.id, true) } label: {
@@ -232,9 +231,6 @@ struct WatchlistSortView: View {
     var body: some View {
         VStack(spacing: 0) {
             PanelHeader(store: store, title: "自选排序", subtitle: "")
-            Text("上下移动即保存，代号保持不变。")
-                .font(.system(size: 10)).foregroundColor(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading).padding(12)
             ForEach(Array(store.state.items.enumerated()), id: \.element.id) { index, item in
                 HStack {
                     Text(store.displayName(item)).lineLimit(1)
